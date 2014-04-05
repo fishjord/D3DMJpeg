@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -26,7 +27,9 @@ namespace MJpegStreamer
 
         private ConcurrentQueue<Image> queue;
 
-        public HttpStreamer(int port, ConcurrentQueue<Image> queue) {
+        public HttpStreamer(int port, ConcurrentQueue<Image> queue)
+        {
+            Trace.WriteLine("Starting down HTTPStreamer");
             this.queue = queue;
             listener = new TcpListener(IPAddress.Any, port);
             listener.Start();
@@ -35,9 +38,16 @@ namespace MJpegStreamer
             processingThread.Start();
         }
 
+        public Boolean HasConnections
+        {
+            get
+            {
+                return connections.Count != 0;
+            }
+        }
+
         private void AddSocket(IAsyncResult ar)
         {
-            Console.WriteLine("Connection in");
             lock (thisLock)
             {
                 if (isShutdown)
@@ -46,7 +56,7 @@ namespace MJpegStreamer
                 }
                 TcpListener listener = (TcpListener)ar.AsyncState;
                 Socket s = listener.EndAcceptSocket(ar);
-                Console.WriteLine(s);
+                Trace.WriteLine("Connection accepted from " + s);
                 SocketHolder holder = new SocketHolder(s, new NetworkStream(s));
                 helper.WriteHeader(holder);
                 connections.Add(holder);
@@ -63,6 +73,7 @@ namespace MJpegStreamer
                 }
 
                 isShutdown = true;
+                Trace.WriteLine("Shutting down HTTPStreamer");
 
                 listener.Stop();
 
@@ -76,7 +87,6 @@ namespace MJpegStreamer
 
         private void InternalLoop()
         {
-            Console.WriteLine("Entered thread loop");
             Image img;
             SocketHolder holder;
             while (true)
@@ -99,14 +109,13 @@ namespace MJpegStreamer
                             }
                             catch (IOException e)
                             {
-                                Console.WriteLine(e);
+                                Trace.WriteLine(e);
                                 connections.RemoveAt(index);
                             }
                         }
                     }
                 }
             }
-            Console.WriteLine("Exited thread loop");
 
             Shutdown();
         }

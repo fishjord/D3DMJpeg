@@ -6,7 +6,9 @@ using System.Linq;
 using System.Text;
 using System.Diagnostics;
 using System.Threading;
-using ScreenshotInterface;
+using Capture.Interface;
+using Capture.Hook;
+using Capture;
 using EasyHook;
 using System.Runtime.Remoting.Channels.Ipc;
 using System.Runtime.Remoting;
@@ -14,15 +16,128 @@ using System.Runtime.InteropServices;
 using System.IO;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Collections.Concurrent;
 
-namespace D3DFrameStreamer
+namespace MJpegStreamer
 {
     class StreamerMain
     {
+        int processId = 0;
+        Process _process;
+        CaptureProcess _captureProcess;
 
-        public static void onMsg(Int32 processId, MessageType type, string msg)
+        private ConcurrentQueue<Image> queue;
+        private HttpStreamer streamer;
+
+        public StreamerMain()
         {
-            Trace.TraceWarning("Debug message from process {0} {1}: {2}", processId, type, msg);
+            queue = new ConcurrentQueue<Image>();
+            streamer = new HttpStreamer(8080, queue);
+        }
+
+        public void DetachProcess()
+        {
+            if (_captureProcess != null)
+            {
+                HookManager.RemoveHookedProcess(_captureProcess.Process.Id);
+                _captureProcess.CaptureInterface.Disconnect();
+                _captureProcess = null;
+            }
+        }
+
+        public void AttachProcess(String exeName, bool gac)
+        {
+            DetachProcess();
+
+            if (gac)
+            {
+                // NOTE: On some 64-bit setups this doesn't work so well.
+                //       Sometimes if using a 32-bit target, it will not find the GAC assembly
+                //       without a machine restart, so requires manual insertion into the GAC
+                // Alternatively if the required assemblies are in the target applications
+                // search path they will load correctly.
+
+                // Must be running as Administrator to allow dynamic registration in GAC
+                Config.Register("Capture",
+                    "Capture.dll");
+            }
+
+            Process[] processes = Process.GetProcessesByName(exeName);
+            foreach (Process process in processes)
+            {
+                // Simply attach to the first one found.
+
+                // If the process doesn't have a mainwindowhandle yet, skip it (we need to be able to get the hwnd to set foreground etc)
+                if (process.MainWindowHandle == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                // Skip if the process is already hooked (and we want to hook multiple applications)
+                if (HookManager.IsHooked(process.Id))
+                {
+                    continue;
+                }
+
+                Direct3DVersion direct3DVersion = Direct3DVersion.AutoDetect;
+
+                CaptureConfig cc = new CaptureConfig()
+                {
+                    Direct3DVersion = direct3DVersion,
+                    ShowOverlay = true,
+                };
+
+                processId = process.Id;
+                _process = process;
+
+                var captureInterface = new CaptureInterface();
+                captureInterface.RemoteMessage += new MessageReceivedEvent(CaptureInterface_RemoteMessage);
+                _captureProcess = new CaptureProcess(process, cc, captureInterface);
+
+                break;
+            }
+
+            Thread.Sleep(10);
+            _captureProcess.BringProcessWindowToFront();
+        }
+
+        public void ShutdownStreamer()
+        {
+            streamer.Shutdown();
+        }
+
+        /// <summary>
+        /// Display messages from the target process
+        /// </summary>
+        /// <param name="message"></param>
+        void CaptureInterface_RemoteMessage(MessageReceivedEventArgs message)
+        {
+            if (message.MessageType != MessageType.Debug)
+            {
+                Trace.WriteLine(message.MessageType + ": " + message.Message);
+            }
+        }
+
+        /// <summary>
+        /// Display debug messages from the target process
+        /// </summary>
+        /// <param name="clientPID"></param>
+        /// <param name="message"></param>
+        void ScreenshotManager_OnScreenshotDebugMessage(int clientPID, string message)
+        {
+            Trace.WriteLine("DEBUG(" + clientPID + "): " + message);
+        }
+
+        /// <summary>
+        /// Create the screen shot request
+        /// </summary>
+        public void DoRequest()
+        {
+            if (streamer.HasConnections)
+            {
+                // Initiate the screenshot of the CaptureInterface, the appropriate event handler within the target process will take care of the rest
+                _captureProcess.CaptureInterface.BeginGetScreenshot(Rectangle.Empty, new TimeSpan(0, 0, 2), Callback);
+            }
         }
 
         /// <summary>
@@ -31,57 +146,28 @@ namespace D3DFrameStreamer
         /// <param name="clientPID"></param>
         /// <param name="status"></param>
         /// <param name="screenshotResponse"></param>
-        public static void processShot(Int32 clientPID, ResponseStatus status, ScreenshotResponse sr)
+        void Callback(IAsyncResult result)
         {
-        }
-
-        static void Main(string[] args)
-        {
-            Trace.Listeners.Add(new TextWriterTraceListener(Console.Out));
-            Trace.AutoFlush = true;
-            Trace.Indent();
-            
-            if (args.Length == 0)
+            if (_captureProcess == null)
             {
-                Console.WriteLine("USAGE: StreamerMain <process name> <target host> <target port> <fps>");
-                Console.WriteLine("\nRunning processes:");
-                foreach (string s in ScreenCapturer.listAllD3DProcesses())
-                {
-                    Console.WriteLine(s);
-                }
-
                 return;
             }
 
-            string processName = args[0];
-            string ffmpegHost = args[1];
-            int ffmpegPort = int.Parse(args[2]);
-            float fps = float.Parse(args[3]);
-
-            ScreenCapturer screenCap = new ScreenCapturer(processShot);
-            ScreenshotManager.OnScreenshotMessage += onMsg;
-            screenCap.hook(processName);
-            screenCap.sendRequest(new StreamRequest(new Rectangle(0, 0, 0, 0), ffmpegHost, ffmpegPort, fps));
-
-            char k;
-            while ((k = Console.ReadKey().KeyChar) != 'q')
+            using (Screenshot screenshot = _captureProcess.CaptureInterface.EndGetScreenshot(result))
             {
-                if (k == 'p')
+                try
                 {
-                    Trace.TraceInformation("Pausing capturing");
-                    screenCap.sendRequest(new PauseRequest());
+                    _captureProcess.CaptureInterface.DisplayInGameText("Screenshot captured...");
+                    if (screenshot != null && screenshot.CapturedBitmap != null)
+                    {
+                        queue.Enqueue(Image.FromStream(new MemoryStream(screenshot.CapturedBitmap)));
+                        CaptureInterface_RemoteMessage(new MessageReceivedEventArgs(MessageType.Information, "Images in queue= " + queue.Count));
+                    }
                 }
-                else if (k == 'r')
+                catch
                 {
-                    Trace.TraceInformation("Pausing capturing");
-                    screenCap.sendRequest(new ResumeRequest());
                 }
-
             }
-            Trace.TraceInformation("Stopping screen caputring...");
-            screenCap.sendRequest(new StopRequest());
-            Thread.Sleep(1000);
-            Console.ReadKey();
         }
     }
 }
