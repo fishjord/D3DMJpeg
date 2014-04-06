@@ -61,7 +61,6 @@ namespace MJpegStreamer
 
         static void Main(string[] args)
         {
-            args = new string[] { "Wow-64", "30" };
             Trace.Listeners.Add(new TextWriterTraceListener(Console.Out));
             Trace.AutoFlush = true;
             Trace.Indent();
