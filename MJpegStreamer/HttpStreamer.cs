@@ -60,6 +60,8 @@ namespace MJpegStreamer
                 SocketHolder holder = new SocketHolder(s, new NetworkStream(s));
                 helper.WriteHeader(holder);
                 connections.Add(holder);
+
+                listener.BeginAcceptSocket(new AsyncCallback(AddSocket), listener);
             }
         }
 
